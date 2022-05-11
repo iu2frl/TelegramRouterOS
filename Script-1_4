@@ -1,0 +1,136 @@
+#----------------------------------------
+# DESCRIZIONE
+# lo script si occupa di leggere i log e se rileva dei messaggi contenenti le stringhe presenti nell'array startBuf, li invia su telegram.
+#------------------------------------------
+# NOTA INSTALLAZIONE
+# copiare lo script in system-->script, creare un nuovo script con il nome "LogFilter".
+# inserire il nome esatto, in quanto lo script cerca lo scheduler per automatizzare l'esecuzione, e se non lo trova lo aggiunge.
+#----------------------------------------
+
+# BEGIN SETUP Edit Here
+:local myserver ([/system identity get name])
+:local scheduleName "LogFilter"
+
+#----------------------------------------
+#inserire qui il botID
+:local bot ""
+#----------------------------------------
+#inserire qui il chatID (es: -123456789)
+:local ChatID ""
+#----------------------------------------
+#inserire il nome identificativo della macchina
+:local myRouterName "RB4011"
+#----------------------------------------
+#inserire qui ogni qunto tempo eseguire lo script
+:local myRunTime 60s
+#----------------------------------------
+
+:local startBuf [:toarray [/log find where (message~" fail" || message~"loop" || message~"fcs" || message~"excessive" || message~"logged in" || message~"logged" || message
+~"error" || message~"warning" || message~"reboot") && time>([/system clock get time] - 2m)]]
+
+# END SETUP
+
+#----------------------------------------
+# verifica se lo scheduler esiste. Se non esiste, lo crea.
+# il tempo di esecuzione è impostato nella variabile myRunTime.
+#----------------------------------------
+:if ([:len [/system scheduler find name="$scheduleName"]] = 0) do={
+	/log warning "[LogFilter] Alert : lo Scheduler non esiste. Creo lo scheduler"
+	/system scheduler add name=$scheduleName interval=$myRunTime start-date=Jan/01/1970 start-time=startup on-event="system script run LogFilter"
+	/log warning "[LogFilter] Alert : Scheduler creato ."
+}
+#----------------------------------------
+
+# get last time
+:local lastTime [/system scheduler get [find name="$scheduleName"] comment]
+# for checking time of each log entry
+:local currentTime
+# log message
+:local message
+
+# final output
+:local output
+:local myMac
+:local myHost
+:local ptr1
+:local ptr2
+
+:local keepOutput false
+# if lastTime is empty, set keepOutput to true
+:if ([:len $lastTime] = 0) do={
+	:set keepOutput true
+}
+
+:local counter 0
+# loop through all log entries that have been found
+:foreach i in=$startBuf do={
+
+	# loop through all removeThese array items
+	:local keepLog true
+	:foreach j in=$removeThese do={
+		#   if this log entry contains any of them, it will be ignored
+		:if ([/log get $i message] ~ "$j") do={
+		:set keepLog false
+		}
+	}
+	
+	:if ($keepLog = true) do={
+		:set message [/log get $i message]
+		# LOG DATE
+		# depending on log date/time, the format may be different. 3 known formats
+		# format of jan/01/2002 00:00:00 which shows up at unknown date/time. Using as default
+		:set currentTime [ /log get $i time ]
+		# format of 00:00:00 which shows up on current day's logs
+		:if ([:len $currentTime] = 8 ) do={
+			:set currentTime ([:pick [/system clock get date] 0 11]." ".$currentTime)
+		} else={
+			# format of jan/01 00:00:00 which shows up on previous day's logs
+			:if ([:len $currentTime] = 15 ) do={
+				:set currentTime ([:pick $currentTime 0 6]."/".[:pick [/system clock get date] 7 11]." ".[:pick $currentTime 7 15])
+			}
+		}
+
+		# if keepOutput is true, add this log entry to output
+		:if ($keepOutput = true) do={
+			:if ( [:find $message " assigned"] > 0 ) do={
+				:set ptr1 ([:find $message "to"] +3)
+				:set ptr2 [:len $message]
+				:set myMac [:pick $message $ptr1 $ptr2 ]
+				:set myHost [/ip dhcp-server lease get [find where mac-address=$myMac] host-name]
+				:set message ($message." name=".$myHost)
+			}
+			:set output ($output.$currentTime." --> ".$message."\r\n")
+		}
+
+		:if ($currentTime = $lastTime) do={
+			:set keepOutput false
+			:set output ""
+		}
+	}
+
+	:if ($counter = ([:len $startBuf]-1)) do={
+		:if ($keepOutput = false) do={
+			:if ([:len $message] > 0) do={
+				:set output ($output.$currentTimer." ".$message."\r\n")
+			}
+		}
+	}
+	
+	:set counter ($counter + 1)
+}
+
+#:set currentTime ([ / system clock get date ] . " " . [ / system clock get time ]);
+
+if ([:len $output] > 0) do={
+	/system scheduler set [find name="$scheduleName"] comment=$currentTime
+	:set output ($myRouterName."\r\n".$output)
+
+	:do { 
+		:local requestUrl "https://api.telegram.org/bot$bot/sendMessage";
+		:local httpData "{\"chat_id\": \"$ChatID\", \"text\": \"$output\"}";
+		/tool fetch url=$requestUrl http-data=$httpData http-header-field=content-type:application/json http-method=post  keep-result=no
+	} on-error={
+		# log errori http post (disabilitato)
+		:log info "finished with error";
+	}
+}
